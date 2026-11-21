@@ -1,0 +1,27 @@
+{
+  "name": "caju-token",
+  "version": "1.0.0",
+  "description": "CAJU - token ERC-20 de cashback para o comércio local do Piauí",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "gas": "cross-env REPORT_GAS=true hardhat test",
+    "coverage": "hardhat coverage",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "frontend": "npm --prefix frontend run dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.6.1",
+    "cross-env": "^10.1.0",
+    "dotenv": "^18.0.10",
+    "hardhat": "^2.29.2",
+    "solc": "^0.8.24"
+  }
+}
