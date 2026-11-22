@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BrowserProvider, Contract, formatUnits, parseUnits, isAddress, ZeroHash } from "ethers";
+// Frontend do CAJU: React + ethers v6 conversando com o contrato pela MetaMask.
+// Não há backend: toda leitura e escrita vai direto para a blockchain. O contract.json
+// é gerado pelo scripts/deploy.js com endereço, chainId, bloco do deploy e ABI do contrato.
 import info from "./contract.json";
 
 // ---------------------------------------------------------------------------
 // Configuração de rede
 // ---------------------------------------------------------------------------
+// Redes conhecidas. O app usa a rede para a qual o contract.json foi gerado (Sepolia ou
+// Hardhat local); "params" são os dados que a MetaMask precisa para cadastrar a Sepolia
+// caso o usuário ainda não a tenha. A rede local não tem explorer, então os links somem.
 const CHAINS = {
   11155111: {
     hex: "0xaa36a7",
@@ -21,8 +27,11 @@ const CHAINS = {
   31337: { hex: "0x7a69", name: "Hardhat local", explorer: null, params: null },
 };
 const TARGET = CHAINS[info.chainId] ?? CHAINS[11155111];
+// Mesmo valor de YEAR (365 days) do contrato, usado para replicar o cálculo do staking.
 const YEAR = 365 * 24 * 60 * 60;
 
+// Catálogo de benefícios de demonstração. Fica no frontend porque o contrato só precisa
+// saber quanto queimar e a descrição (que vai para o evento BeneficioResgatado).
 const BENEFICIOS = [
   { nome: "Suco de caju grátis · Lanchonete Central", custo: 5 },
   { nome: "Frete grátis · Delivery Teresina", custo: 8 },
@@ -34,6 +43,9 @@ const BENEFICIOS = [
 // ---------------------------------------------------------------------------
 // Utilitários
 // ---------------------------------------------------------------------------
+// Valores do contrato chegam como BigInt em unidades de 18 casas decimais; fmt converte
+// para número legível no padrão brasileiro (1.234,56). Só para exibição: os cálculos
+// que importam continuam em BigInt para não perder precisão.
 const fmt = (v, dec = 2) => {
   if (v === undefined || v === null) return "—";
   const n = Number(formatUnits(v, 18));
@@ -43,6 +55,9 @@ const short = (a) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const txLink = (h) => (TARGET.explorer ? `${TARGET.explorer}/tx/${h}` : null);
 const addrLink = (a) => (TARGET.explorer ? `${TARGET.explorer}/address/${a}` : null);
 
+// Traduz erros técnicos (ethers/MetaMask/reverts do contrato) em mensagens em português.
+// Os "require" do contrato já vêm com texto ("CAJU: ..."), mas os erros customizados da
+// OpenZeppelin 5 (EnforcedPause, AccessControlUnauthorizedAccount...) chegam só pelo nome.
 function parseError(err) {
   const msg =
     err?.reason ||
@@ -62,6 +77,7 @@ function parseError(err) {
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
+// Componente principal: guarda o estado da carteira, lê o contrato e repassa aos cartões.
 export default function App() {
   const [account, setAccount] = useState(null);
   const [chainId, setChainId] = useState(null);
@@ -72,10 +88,16 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
 
+  // wrongNetwork: carteira conectada, mas numa rede diferente da do contrato. Nesse caso
+  // nenhuma leitura é feita (o endereço não existiria lá) e aparece o botão de troca de rede.
   const hasWallet = typeof window !== "undefined" && !!window.ethereum;
   const wrongNetwork = account && chainId !== info.chainId;
 
   // ---- Conexão --------------------------------------------------------------
+  // setup(): monta provider, signer e Contract a partir da MetaMask. Usa "eth_accounts",
+  // que NÃO abre popup: só devolve contas que o usuário já autorizou. Por isso pode rodar
+  // ao carregar a página (reconexão automática) sem incomodar quem ainda não conectou.
+  // O Contract é criado com o signer para que as chamadas de escrita sejam assinadas pela carteira.
   const setup = useCallback(async () => {
     if (!window.ethereum) return;
     const provider = new BrowserProvider(window.ethereum);
@@ -92,6 +114,7 @@ export default function App() {
     setContract(new Contract(info.address, info.abi, signer));
   }, []);
 
+  // connect(): acionado pelo botão. "eth_requestAccounts" abre o popup de permissão da MetaMask.
   const connect = async () => {
     if (!window.ethereum) return;
     try {
@@ -102,6 +125,8 @@ export default function App() {
     }
   };
 
+  // Troca de rede: pede à MetaMask para mudar para a rede do contrato. O erro 4902 significa
+  // "rede não cadastrada na carteira"; nesse caso a Sepolia é adicionada com TARGET.params.
   const switchNetwork = async () => {
     try {
       await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: TARGET.hex }] });
@@ -112,6 +137,8 @@ export default function App() {
     }
   };
 
+  // wallet_watchAsset (EIP-747): adiciona o CAJU à lista de tokens da MetaMask, para o
+  // saldo aparecer também dentro da carteira.
   const addToMetaMask = async () => {
     try {
       await window.ethereum.request({
@@ -123,6 +150,8 @@ export default function App() {
     }
   };
 
+  // Ao montar a página, tenta reconectar; depois reage à troca de conta ou de rede na
+  // MetaMask refazendo o setup. O retorno remove os listeners quando o componente sai da tela.
   useEffect(() => {
     if (!window.ethereum) return;
     setup();
@@ -136,6 +165,12 @@ export default function App() {
   }, [setup]);
 
   // ---- Leitura do contrato --------------------------------------------------
+  // refresh(): lê todo o estado relevante do contrato de uma vez. São chamadas "view",
+  // gratuitas (não geram transação), disparadas em paralelo com Promise.all para a tela
+  // carregar mais rápido. ZeroHash é o DEFAULT_ADMIN_ROLE (bytes32 zero) da OpenZeppelin.
+  // Os papéis só decidem quais painéis mostrar; a segurança de verdade está no onlyRole
+  // do contrato, que recusa a transação de quem não tem permissão mesmo que a tela seja burlada.
+  // fetchedAt marca o instante da leitura, usado no cálculo do rendimento ao vivo.
   const refresh = useCallback(async () => {
     if (!contract || !account || chainId !== info.chainId) return;
     try {
@@ -177,6 +212,10 @@ export default function App() {
     }
   }, [contract, account, chainId]);
 
+  // loadActivity(): histórico montado a partir dos EVENTOS do contrato (logs), sem banco
+  // de dados. A busca começa no bloco do deploy, mas limitada aos últimos 45.000 blocos,
+  // porque RPCs públicos recusam consultas de logs em intervalos muito grandes.
+  // Os filtros usam os parâmetros "indexed" dos eventos para trazer só o que é desta conta.
   const loadActivity = useCallback(async () => {
     if (!contract || !account || chainId !== info.chainId) return;
     try {
@@ -193,6 +232,10 @@ export default function App() {
         contract.queryFilter(f.Unstaked(account), from),
         contract.queryFilter(f.RendimentoSacado(account), from),
       ]);
+      // Uma mesma transação pode emitir vários eventos: um stake emite Staked e também um
+      // Transfer para o contrato; um cashback emite CashbackConcedido e um Transfer vindo do
+      // endereço zero. Os eventos específicos são mais descritivos, então os Transfer dessas
+      // transações são descartados para não aparecer a mesma operação duas vezes.
       const special = new Set([...cashbacks, ...resgates, ...stakesEv, ...unstakes, ...rewards].map((e) => e.transactionHash));
       const items = [];
       const push = (e, kind, label, amount, sign) =>
@@ -203,11 +246,15 @@ export default function App() {
       stakesEv.forEach((e) => push(e, "stake", "Colocou em staking", e.args.valor, "→"));
       unstakes.forEach((e) => push(e, "stake", "Retirou do staking", e.args.valor, "←"));
       rewards.forEach((e) => push(e, "reward", "Rendimento de staking", e.args.valor, "+"));
+      // Também ficam de fora o Transfer da taxa (a parte que vai para a tesouraria) e os
+      // Transfer vindos do endereço zero (emissões), que já aparecem pelos eventos específicos.
+      // Consequência: um mint direto de campanha (sem evento próprio) não aparece no histórico.
       sent.filter((e) => !special.has(e.transactionHash) && e.args.to !== data?.treasury)
         .forEach((e) => push(e, "out", `Enviado para ${short(e.args.to)}`, e.args.value, "−"));
       received.filter((e) => !special.has(e.transactionHash) && e.args.from !== "0x0000000000000000000000000000000000000000")
         .forEach((e) => push(e, "in", `Recebido de ${short(e.args.from)}`, e.args.value, "+"));
 
+      // Mais recentes primeiro, mostrando no máximo 12 itens.
       items.sort((a, b) => b.block - a.block);
       setActivity(items.slice(0, 12));
     } catch (err) {
@@ -215,6 +262,7 @@ export default function App() {
     }
   }, [contract, account, chainId, data?.treasury]);
 
+  // Relê o contrato sempre que a conexão muda; o histórico é recarregado após cada leitura nova.
   useEffect(() => {
     refresh();
   }, [refresh]);
@@ -225,11 +273,17 @@ export default function App() {
   }, [data?.fetchedAt]);
 
   // relógio para o rendimento "ao vivo"
+  // Atualiza "now" a cada segundo. Só re-renderiza a tela; não faz nenhuma chamada à blockchain.
   useEffect(() => {
     const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(t);
   }, []);
 
+  // Rendimento ao vivo: o contrato calcula o rendimento por segundo, mas só sabemos o valor
+  // de quando lemos (data.earned). Para o número subir na tela sem consultar a blockchain a
+  // cada segundo, a mesma fórmula do contrato (valor × 1200 bps × tempo / (10000 × 1 ano))
+  // é aplicada ao tempo decorrido desde a leitura. Usa BigInt para casar com o cálculo
+  // inteiro do Solidity. É só uma estimativa visual: o valor pago no saque é o do contrato.
   const liveEarned = useMemo(() => {
     if (!data) return 0n;
     const dt = BigInt(Math.max(0, now - data.fetchedAt));
@@ -237,6 +291,13 @@ export default function App() {
   }, [data, now]);
 
   // ---- Envio de transações ---------------------------------------------------
+  // run(): fluxo único para TODAS as transações de escrita, para que todas tenham o mesmo
+  // retorno visual. Etapas: (1) fn() abre a MetaMask e, após a assinatura, devolve a transação
+  // já enviada à rede, com hash (já dá para ver no Etherscan); (2) tx.wait() espera ela ser
+  // minerada e devolve o recibo com bloco e gas usado; (3) refresh() relê saldos para a tela
+  // refletir o novo estado. "busy" desabilita os botões para evitar envio duplicado.
+  // Devolve true/false para o cartão saber se pode limpar o formulário. Se a transação
+  // reverter, parseError mostra o motivo (ex.: "CAJU: endereco bloqueado").
   const run = async (label, fn) => {
     setBusy(label);
     setToast({ type: "info", text: `${label}: confirme na MetaMask…` });
@@ -258,6 +319,8 @@ export default function App() {
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
+  // Os painéis de loja/admin só aparecem se a carteira tiver ao menos um papel.
+  // O percentual do supply é calculado em BigInt (×10000) para manter duas casas decimais.
   const anyRole = data && Object.values(data.roles).some(Boolean);
   const supplyPct = data ? Number((data.totalSupply * 10000n) / data.cap) / 100 : 0;
 
@@ -368,12 +431,17 @@ export default function App() {
 // ---------------------------------------------------------------------------
 // Cartões
 // ---------------------------------------------------------------------------
+// TransferCard: transferência com prévia da taxa. A prévia chama previewTransfer() do
+// próprio contrato (view, gratuita) em vez de recalcular no frontend, assim isenções e
+// mudanças de taxa já são consideradas e a tela nunca diverge do que vai acontecer.
 function TransferCard({ contract, account, data, run, busy }) {
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [preview, setPreview] = useState(null);
 
   useEffect(() => {
+    // Espera 250 ms depois da última tecla (debounce) para não consultar a cada caractere;
+    // a flag "alive" descarta respostas antigas que chegam depois de o usuário mudar o valor.
     let alive = true;
     const go = async () => {
       if (!isAddress(to) || !(Number(amount) > 0)) return setPreview(null);
@@ -427,6 +495,9 @@ function TransferCard({ contract, account, data, run, busy }) {
   );
 }
 
+// StakingCard: stake, unstake e saque do rendimento. A projeção anual é só ilustrativa
+// (12% do valor digitado); o rendimento mostrado é o liveEarned calculado no App.
+// O stake não precisa de approve: o próprio contrato movimenta os tokens de quem chama.
 function StakingCard({ contract, data, liveEarned, run, busy }) {
   const [amount, setAmount] = useState("");
   const valid = Number(amount) > 0;
@@ -467,6 +538,9 @@ function StakingCard({ contract, data, liveEarned, run, busy }) {
   );
 }
 
+// ResgateCard: escolhe um benefício e chama resgatar(), que QUEIMA os tokens (burn) e
+// registra a descrição no evento. O botão já se desabilita se o saldo não cobre o custo,
+// evitando uma transação que reverteria e gastaria gas à toa.
 function ResgateCard({ contract, data, run, busy }) {
   const [sel, setSel] = useState(0);
   const b = BENEFICIOS[sel];
@@ -492,6 +566,7 @@ function ResgateCard({ contract, data, run, busy }) {
   );
 }
 
+// ActivityCard: exibe o histórico montado em loadActivity, com link de cada transação no Etherscan.
 function ActivityCard({ items }) {
   return (
     <section className="card">
@@ -511,6 +586,8 @@ function ActivityCard({ items }) {
   );
 }
 
+// AdminCard: painel da loja/administração. Cada bloco só aparece para quem tem o papel
+// correspondente (MINTER, COMPLIANCE, ADMIN, PAUSER), espelhando o controle de acesso do contrato.
 function AdminCard({ contract, data, run, busy }) {
   const { roles } = data;
   const [cliente, setCliente] = useState("");
@@ -521,11 +598,17 @@ function AdminCard({ contract, data, run, busy }) {
   const [blStatus, setBlStatus] = useState(null);
   const [fee, setFee] = useState("");
 
+  // Consulta se a carteira digitada já está bloqueada, para o botão alternar entre
+  // "Bloquear" e "Desbloquear". Refaz a consulta após cada transação (data.fetchedAt).
   useEffect(() => {
     if (!isAddress(blAddr)) return setBlStatus(null);
     contract.isBlacklisted(blAddr).then(setBlStatus).catch(() => setBlStatus(null));
   }, [blAddr, contract, data.fetchedAt]);
 
+  // Prévia do cashback: valor × cashbackBps / 10000. Ex.: R$ 200 × 500 / 10000 = 10 CAJU.
+  // Na chamada real o valor vai em CENTAVOS inteiros (Math.round(R$ × 100)), porque o
+  // contrato não trabalha com casas decimais; o round evita erros de ponto flutuante (19.99 × 100).
+  // Do mesmo modo, a taxa digitada em % é convertida para basis points (1% = 100 bps).
   const cashbackPreview = Number(compra) > 0 ? ((Number(compra) * data.cashbackBps) / 10000).toLocaleString("pt-BR", { maximumFractionDigits: 2 }) : null;
 
   return (
@@ -600,6 +683,7 @@ function AdminCard({ contract, data, run, busy }) {
 // ---------------------------------------------------------------------------
 // Pequenos componentes
 // ---------------------------------------------------------------------------
+// Stat: indicador do painel; "live" mostra o ponto pulsante quando o valor sobe em tempo real.
 function Stat({ label, value, live }) {
   return (
     <div className="stat">
@@ -609,10 +693,12 @@ function Stat({ label, value, live }) {
   );
 }
 
+// Notice: faixa de aviso (MetaMask ausente, rede errada, carteira bloqueada).
 function Notice({ children, tone }) {
   return <div className={`notice ${tone === "danger" ? "notice-danger" : ""}`}>{children}</div>;
 }
 
+// Hero: tela inicial para quem ainda não conectou a carteira.
 function Hero({ onConnect }) {
   return (
     <section className="hero">
@@ -633,6 +719,7 @@ function Hero({ onConnect }) {
   );
 }
 
+// CajuMark: logotipo do caju desenhado em SVG (sem arquivo de imagem externo).
 function CajuMark() {
   return (
     <svg width="44" height="44" viewBox="0 0 64 64" aria-hidden="true">

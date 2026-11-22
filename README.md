@@ -7,10 +7,10 @@ Token **ERC-20** de cashback para o comércio local. Lojas parceiras dão de vol
 
 | | |
 |---|---|
-| Contrato | `PREENCHER_APOS_DEPLOY` |
-| Etherscan | https://sepolia.etherscan.io/address/PREENCHER |
-| Hash do deploy | `PREENCHER` |
-| Frontend online | PREENCHER (Vercel/GitHub Pages) |
+| Contrato | `0x34cc40D721132AAd604F5D92f53516b288d7620c` |
+| Etherscan | https://sepolia.etherscan.io/address/0x34cc40D721132AAd604F5D92f53516b288d7620c |
+| Hash do deploy | `0x3ca5b6be2e7fd314b5934e8e0e4ab863352728ff70e9296b4c3bbe271527f5c1` |
+| Frontend online | PREENCHER |
 | Vídeo | PREENCHER |
 
 ---
@@ -79,6 +79,7 @@ caju-token/
 | `claimRewards` | ~76.000–93.000 |
 | `setBlacklist` | ~28.000–50.000 |
 | `pause` / `unpause` | ~47.000 / ~25.000 |
+| **Deploy real na Sepolia** (bloco 12190274) | 14.933.880 gas × 1,0 gwei = **0,01493388 ETH** |
 
 Custo em ETH = gas × preço do gas. O valor real do deploy na Sepolia fica em `deployment.json` (o script imprime).
 
